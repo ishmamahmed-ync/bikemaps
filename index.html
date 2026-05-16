@@ -1,0 +1,605 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Bike rides</title>
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css"/>
+<style>
+  html, body { margin: 0; padding: 0; height: 100%; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+  #map { position: absolute; top: 0; bottom: 0; left: 0; right: 0; background: #eee; }
+  .leaflet-tile-pane { filter: grayscale(100%) contrast(1.05); }
+
+  .panel {
+    position: absolute; top: 12px; left: 12px; z-index: 1000;
+    background: rgba(255,255,255,0.97); padding: 12px 14px; border-radius: 8px;
+    box-shadow: 0 2px 12px rgba(0,0,0,0.15); font-size: 13px;
+    width: 280px; max-height: calc(100% - 24px); overflow-y: auto;
+  }
+  .panel h2 { margin: 0; font-size: 14px; }
+  .panel .header { display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-bottom: 8px; }
+  .panel .section { padding: 8px 0; border-top: 1px solid #eee; }
+  .panel .section:first-of-type { border-top: none; padding-top: 0; }
+  .panel .stat { display: flex; justify-content: space-between; gap: 12px; padding: 2px 0; color: #333; }
+  .panel .stat b { font-weight: 600; }
+  .panel .lbl { display: block; font-size: 11px; color: #666; margin-bottom: 4px; text-transform: uppercase; letter-spacing: 0.5px; }
+  input[type="text"] {
+    width: 100%; padding: 6px 8px; border: 1px solid #ccc;
+    border-radius: 4px; font-size: 12px; box-sizing: border-box; font-family: inherit;
+  }
+  label.upload {
+    display: block; padding: 8px 10px; border: 1px dashed #aaa; border-radius: 6px;
+    text-align: center; cursor: pointer; color: #555; font-size: 12px;
+    transition: background 0.15s, border-color 0.15s; margin-top: 8px;
+  }
+  label.upload:hover { background: #f5f7ff; border-color: #2563eb; color: #2563eb; }
+  label.upload.disabled { opacity: 0.5; pointer-events: none; }
+  label.upload input { display: none; }
+  select, button.btn {
+    width: 100%; padding: 6px 8px; border: 1px solid #ccc; background: white;
+    border-radius: 4px; font-size: 12px; box-sizing: border-box; font-family: inherit;
+  }
+  select { margin-top: 6px; cursor: pointer; }
+  button.btn { margin-top: 6px; cursor: pointer; }
+  button.btn:hover { background: #f5f5f5; }
+  button.btn:disabled { opacity: 0.5; cursor: not-allowed; }
+  button.btn.danger { color: #b91c1c; border-color: #fca5a5; }
+  button.btn.danger:hover { background: #fef2f2; border-color: #b91c1c; }
+  .toggle { display: flex; gap: 4px; }
+  .toggle button {
+    flex: 1; padding: 6px 4px; border: 1px solid #ccc; background: #fff;
+    border-radius: 4px; cursor: pointer; font-size: 12px;
+  }
+  .toggle button.active { background: #2563eb; color: white; border-color: #2563eb; }
+  .empty {
+    color: #888; font-size: 12px; padding: 6px 0; text-align: center; font-style: italic;
+  }
+  .status {
+    font-size: 11px; padding: 2px 6px; border-radius: 4px;
+    display: inline-flex; align-items: center; gap: 4px; white-space: nowrap;
+  }
+  .status.idle { color: #16a34a; }
+  .status.busy { color: #d97706; }
+  .status.error { color: #b91c1c; }
+
+  .legend {
+    position: absolute; bottom: 24px; right: 12px; z-index: 1000;
+    background: rgba(255,255,255,0.97); padding: 10px 12px; border-radius: 8px;
+    box-shadow: 0 2px 12px rgba(0,0,0,0.15); font-size: 10px;
+  }
+  .legend .title { font-weight: 600; font-size: 12px; margin-bottom: 4px; }
+  .legend .bar { width: 280px; height: 12px; border-radius: 2px; margin: 4px 0; }
+  .legend .ticks {
+    display: flex; justify-content: space-between;
+    font-variant-numeric: tabular-nums; color: #555;
+  }
+  .legend .ticks span { flex: 0 0 auto; }
+  .legend.hidden { display: none; }
+
+  .leaflet-popup-content { font-size: 12px; line-height: 1.5; }
+  .leaflet-popup-content .time { font-weight: 600; color: #111; }
+</style>
+</head>
+<body>
+<div id="map"></div>
+
+<div class="panel">
+  <div class="section">
+    <div class="header">
+      <h2>Bike rides</h2>
+      <span id="status" class="status busy">Connecting…</span>
+    </div>
+    <span class="lbl">Your name</span>
+    <input type="text" id="name-input" placeholder="e.g. Golam" maxlength="40">
+    <label class="upload" id="upload-label">
+      <input type="file" id="file-input" accept=".txt,text/plain" multiple>
+      + Upload .txt file(s)
+    </label>
+  </div>
+
+  <div class="section" id="ride-section">
+    <span class="lbl">Select a ride</span>
+    <div id="ride-empty" class="empty">No rides yet — upload a file above.</div>
+    <select id="ride-select" style="display:none;"></select>
+    <button class="btn danger" id="delete-btn" style="display:none;">Delete this ride</button>
+  </div>
+
+  <div class="section" id="stats-section" style="display:none;">
+    <div class="stat"><span>Date</span><b id="s-date"></b></div>
+    <div class="stat"><span>Rider</span><b id="s-user"></b></div>
+    <div class="stat"><span>Duration</span><b id="s-dur"></b></div>
+    <div class="stat"><span>Distance</span><b id="s-dist"></b></div>
+    <div class="stat"><span>Avg temp</span><b id="s-temp"></b></div>
+    <div class="stat"><span>Avg humidity</span><b id="s-hum"></b></div>
+  </div>
+
+  <div class="section" id="toggle-section" style="display:none;">
+    <span class="lbl">Color by</span>
+    <div class="toggle">
+      <button id="b-temp" class="active">Temperature</button>
+      <button id="b-hum">Humidity</button>
+    </div>
+  </div>
+
+  <div class="section" id="zoom-section" style="display:none;">
+    <span class="lbl">View width</span>
+    <div class="toggle">
+      <button id="z-free" class="active">Free</button>
+      <button id="z-2k">2 km</button>
+      <button id="z-5k">5 km</button>
+      <button id="z-10k">10 km</button>
+    </div>
+  </div>
+</div>
+
+<div class="legend hidden" id="legend">
+  <div class="title" id="legend-title">Temperature</div>
+  <div class="bar" id="legend-bar"></div>
+  <div class="ticks" id="legend-ticks"></div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<script type="module">
+import { initializeApp } from "https://www.gstatic.com/firebasejs/10.13.0/firebase-app.js";
+import {
+  getFirestore, collection, doc, setDoc, deleteDoc, onSnapshot
+} from "https://www.gstatic.com/firebasejs/10.13.0/firebase-firestore.js";
+
+// ---------- Firebase config ----------
+const firebaseConfig = {
+  apiKey: "AIzaSyBgph4khr-Vu77XmAZo5Jva_lFLEibm3PI",
+  authDomain: "yale-bike-health.firebaseapp.com",
+  projectId: "yale-bike-health",
+  storageBucket: "yale-bike-health.firebasestorage.app",
+  messagingSenderId: "1063907596080",
+  appId: "1:1063907596080:web:6e634330075735748a9af5"
+};
+const app = initializeApp(firebaseConfig);
+const db = getFirestore(app);
+const RIDES = collection(db, 'rides');
+
+const MAX_POINTS_PER_RIDE = 2000; // Firestore doc cap is 1MB; this is well under
+
+// ---------- compression (keeps transfers small) ----------
+function timeToSec(t) {
+  const [h, m, s] = t.split(':').map(Number);
+  return h * 3600 + m * 60 + s;
+}
+function secToTime(total) {
+  total = ((total % 86400) + 86400) % 86400;
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const s = total % 60;
+  return `${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`;
+}
+function subsamplePoints(pts, maxCount) {
+  if (pts.length <= maxCount) return pts.slice();
+  const stride = Math.ceil(pts.length / maxCount);
+  const out = [];
+  for (let i = 0; i < pts.length; i += stride) out.push(pts[i]);
+  if (out[out.length - 1] !== pts[pts.length - 1]) out.push(pts[pts.length - 1]);
+  return out;
+}
+function packRide(ride) {
+  const pts = subsamplePoints(ride.points, MAX_POINTS_PER_RIDE);
+  const t0 = pts[0]?.t || '00:00:00';
+  const t0Sec = timeToSec(t0);
+  const dt = [], lat = [], lon = [], temp = [], hum = [];
+  for (const pt of pts) {
+    dt.push(timeToSec(pt.t) - t0Sec);
+    lat.push(+pt.lat.toFixed(5));
+    lon.push(+pt.lon.toFixed(5));
+    temp.push(+pt.temp.toFixed(2));
+    hum.push(+pt.hum.toFixed(2));
+  }
+  return {
+    id: ride.id,
+    u: ride.user || 'Anonymous',
+    f: ride.filename || '',
+    d: ride.dateIso || null,
+    n: ride.dateDisplay || '',
+    ts: ride.uploadedAt || Date.now(),
+    t0,
+    dt, lat, lon, temp, hum
+  };
+}
+function unpackRide(c) {
+  // Backwards-compat with very old object-form
+  if (c.points && Array.isArray(c.points)) {
+    return {
+      id: c.id, user: c.user || 'Anonymous', filename: c.filename || '',
+      dateIso: c.dateIso || null, dateDisplay: c.dateDisplay || '',
+      uploadedAt: c.uploadedAt || 0, points: c.points
+    };
+  }
+  // New format: parallel arrays
+  if (c.dt && c.lat && c.lon && c.temp && c.hum) {
+    const t0Sec = timeToSec(c.t0 || '00:00:00');
+    const points = [];
+    for (let i = 0; i < c.dt.length; i++) {
+      points.push({
+        t: secToTime(t0Sec + c.dt[i]),
+        lat: c.lat[i],
+        lon: c.lon[i],
+        temp: c.temp[i],
+        hum: c.hum[i]
+      });
+    }
+    return {
+      id: c.id, user: c.u || 'Anonymous', filename: c.f || '',
+      dateIso: c.d || null, dateDisplay: c.n || '',
+      uploadedAt: c.ts || 0, points
+    };
+  }
+  // Old packed format with nested array (shouldn't exist in Firestore but kept for safety)
+  if (c.p) {
+    const t0Sec = timeToSec(c.t0 || '00:00:00');
+    const points = (c.p || []).map(([dt, lat, lon, temp, hum]) => ({
+      t: secToTime(t0Sec + dt), lat, lon, temp, hum
+    }));
+    return {
+      id: c.id, user: c.u || 'Anonymous', filename: c.f || '',
+      dateIso: c.d || null, dateDisplay: c.n || '',
+      uploadedAt: c.ts || 0, points
+    };
+  }
+  return null;
+}
+
+// ---------- local UI state ----------
+const UI_KEY = 'bikeRidesUI_v2';
+function loadUI() {
+  try {
+    const raw = localStorage.getItem(UI_KEY);
+    if (!raw) return { selectedId: null, metric: 'temp', user: '', zoomMode: 'free' };
+    const s = JSON.parse(raw);
+    return {
+      selectedId: s.selectedId || null,
+      metric: s.metric || 'temp',
+      user: s.user || '',
+      zoomMode: s.zoomMode || 'free'
+    };
+  } catch (e) { return { selectedId: null, metric: 'temp', user: '', zoomMode: 'free' }; }
+}
+function saveUI(s) {
+  try { localStorage.setItem(UI_KEY, JSON.stringify(s)); } catch (e) { console.error(e); }
+}
+
+// ---------- parsing ----------
+function parseFile(text) {
+  const points = [];
+  for (const rawLine of text.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line) continue;
+    const parts = line.split(',').map(s => s.trim());
+    if (parts.length !== 6) continue;
+    const [t, lonS, latS, , tmpS, humS] = parts;
+    if (!/^[EW]/.test(lonS) || !/^[NS]/.test(latS)) continue;
+    const lon = parseFloat(lonS.slice(1)) * (lonS[0] === 'E' ? 1 : -1);
+    const lat = parseFloat(latS.slice(1)) * (latS[0] === 'N' ? 1 : -1);
+    const temp = parseFloat(String(tmpS).replace(/C$/i, ''));
+    const hum = parseFloat(String(humS).replace(/%$/, ''));
+    if (![lat, lon, temp, hum].every(Number.isFinite)) continue;
+    points.push({ t, lat, lon, temp, hum });
+  }
+  return points;
+}
+function dateFromFilename(filename) {
+  const base = filename.replace(/\.txt$/i, '');
+  const m = base.match(/^(\d{4})(\d{2})(\d{2})/);
+  if (m) return `${m[1]}-${m[2]}-${m[3]}`;
+  return null;
+}
+function prettyDate(iso) {
+  const [y, mo, d] = iso.split('-').map(Number);
+  const dt = new Date(Date.UTC(y, mo-1, d));
+  return dt.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
+}
+
+// ---------- map setup ----------
+const map = L.map('map', { worldCopyJump: true }).setView([1.31, 103.78], 14);
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+  attribution: '© OpenStreetMap contributors', maxZoom: 19
+}).addTo(map);
+L.control.scale({ imperial: false, maxWidth: 150, position: 'bottomleft' }).addTo(map);
+let layerGroup = L.layerGroup().addTo(map);
+
+function colorFor(v, vmin, vmax) {
+  const t = vmax === vmin ? 0.5 : Math.max(0, Math.min(1, (v - vmin) / (vmax - vmin)));
+  const hue = 220 - t * 220;
+  return `hsl(${hue}, 80%, 50%)`;
+}
+function haversine(a, b) {
+  const R = 6371000, toR = Math.PI/180;
+  const dLat = (b.lat - a.lat) * toR;
+  const dLon = (b.lon - a.lon) * toR;
+  const la1 = a.lat * toR, la2 = b.lat * toR;
+  const x = Math.sin(dLat/2)**2 + Math.cos(la1)*Math.cos(la2)*Math.sin(dLon/2)**2;
+  return 2 * R * Math.asin(Math.sqrt(x));
+}
+function rideDistance(pts) {
+  let d = 0;
+  for (let i = 1; i < pts.length; i++) d += haversine(pts[i-1], pts[i]);
+  return d;
+}
+const ZOOM_FOR_KM = { '2k': 15, '5k': 14, '10k': 13 };
+function applyZoom(ride) {
+  if (!ride || ride.points.length < 2) return;
+  const bounds = L.latLngBounds(ride.points.map(p => [p.lat, p.lon]));
+  if (ui.zoomMode === 'free') map.fitBounds(bounds, { padding: [40, 40] });
+  else map.setView(bounds.getCenter(), ZOOM_FOR_KM[ui.zoomMode]);
+}
+
+function renderRide(ride, metric) {
+  layerGroup.clearLayers();
+  if (!ride || ride.points.length < 2) {
+    document.getElementById('legend').classList.add('hidden');
+    return;
+  }
+  const pts = ride.points;
+  const vals = metric === 'temp' ? pts.map(p => p.temp) : pts.map(p => p.hum);
+  const vmin = Math.min(...vals), vmax = Math.max(...vals);
+
+  for (let i = 1; i < pts.length; i++) {
+    const v = (vals[i-1] + vals[i]) / 2;
+    const seg = L.polyline(
+      [[pts[i-1].lat, pts[i-1].lon], [pts[i].lat, pts[i].lon]],
+      { color: colorFor(v, vmin, vmax), weight: 5, opacity: 0.9 }
+    );
+    const p = pts[i];
+    seg.bindPopup(
+      `<div class="time">${p.t}</div>` +
+      `Temp: ${p.temp.toFixed(2)}°<br>` +
+      `Humidity: ${p.hum.toFixed(2)}%<br>` +
+      `<span style="color:#888">${p.lat.toFixed(5)}, ${p.lon.toFixed(5)}</span>`
+    );
+    layerGroup.addLayer(seg);
+  }
+  const start = pts[0], end = pts[pts.length-1];
+  layerGroup.addLayer(L.circleMarker([start.lat, start.lon], {
+    radius: 8, color: '#fff', weight: 2, fillColor: '#16a34a', fillOpacity: 1
+  }).bindPopup(`<b>Start</b><br>${start.t}`));
+  layerGroup.addLayer(L.circleMarker([end.lat, end.lon], {
+    radius: 8, color: '#fff', weight: 2, fillColor: '#dc2626', fillOpacity: 1
+  }).bindPopup(`<b>End</b><br>${end.t}`));
+  applyZoom(ride);
+
+  const unit = metric === 'temp' ? '°' : '%';
+  document.getElementById('legend-title').textContent = metric === 'temp' ? 'Temperature' : 'Humidity';
+  const N_TICKS = 8;
+  const ticksEl = document.getElementById('legend-ticks');
+  ticksEl.innerHTML = '';
+  for (let i = 0; i < N_TICKS; i++) {
+    const v = vmin + (vmax - vmin) * (i / (N_TICKS - 1));
+    const span = document.createElement('span');
+    span.textContent = v.toFixed(1) + unit;
+    ticksEl.appendChild(span);
+  }
+  const stops = [];
+  for (let i = 0; i <= 10; i++) {
+    const v = vmin + (vmax - vmin) * (i/10);
+    stops.push(colorFor(v, vmin, vmax) + ' ' + (i*10) + '%');
+  }
+  document.getElementById('legend-bar').style.background =
+    'linear-gradient(to right, ' + stops.join(', ') + ')';
+  document.getElementById('legend').classList.remove('hidden');
+}
+
+function renderStats(ride) {
+  const sec = document.getElementById('stats-section');
+  if (!ride) { sec.style.display = 'none'; return; }
+  sec.style.display = '';
+  const pts = ride.points;
+  const avg = arr => arr.reduce((a,b)=>a+b,0)/arr.length;
+  document.getElementById('s-date').textContent = ride.dateDisplay || '—';
+  document.getElementById('s-user').textContent = ride.user || 'Anonymous';
+  document.getElementById('s-dur').textContent =
+    pts.length > 1 ? `${pts[0].t} → ${pts[pts.length-1].t}` : '—';
+  document.getElementById('s-dist').textContent = (rideDistance(pts)/1000).toFixed(2) + ' km';
+  document.getElementById('s-temp').textContent = avg(pts.map(p=>p.temp)).toFixed(1) + '°';
+  document.getElementById('s-hum').textContent = avg(pts.map(p=>p.hum)).toFixed(1) + '%';
+}
+
+function rideLabel(r) {
+  const pts = r.points;
+  const first = pts[0]?.t || '';
+  const last = pts[pts.length-1]?.t || '';
+  const distKm = (rideDistance(pts)/1000).toFixed(2);
+  const user = r.user || 'Anonymous';
+  const date = r.dateDisplay || 'Unknown date';
+  return `${date} · ${first}–${last} · ${distKm} km · ${user}`;
+}
+function rideSortKey(r) {
+  const datePart = r.dateIso || '9999-12-31';
+  const timePart = r.points[0]?.t || '00:00:00';
+  return `${datePart}T${timePart}`;
+}
+
+// ---------- state ----------
+let rides = [];
+let ui = loadUI();
+let pendingSelectId = null;   // set during upload, picks up new ride when snapshot arrives
+let firstSnapshot = true;
+
+const fileInput = document.getElementById('file-input');
+const uploadLabel = document.getElementById('upload-label');
+const nameInput = document.getElementById('name-input');
+const rideSelect = document.getElementById('ride-select');
+const rideEmpty = document.getElementById('ride-empty');
+const deleteBtn = document.getElementById('delete-btn');
+const toggleSec = document.getElementById('toggle-section');
+const zoomSec = document.getElementById('zoom-section');
+const bTemp = document.getElementById('b-temp');
+const bHum = document.getElementById('b-hum');
+const zFree = document.getElementById('z-free');
+const z2k = document.getElementById('z-2k');
+const z5k = document.getElementById('z-5k');
+const z10k = document.getElementById('z-10k');
+const statusEl = document.getElementById('status');
+
+nameInput.value = ui.user;
+
+function setStatus(kind, text) {
+  statusEl.className = `status ${kind}`;
+  statusEl.textContent = text;
+}
+
+function renderAll() {
+  const hasRides = rides.length > 0;
+  rideSelect.style.display = hasRides ? '' : 'none';
+  deleteBtn.style.display = hasRides ? '' : 'none';
+  toggleSec.style.display = hasRides ? '' : 'none';
+  zoomSec.style.display = hasRides ? '' : 'none';
+  rideEmpty.style.display = hasRides ? 'none' : '';
+
+  rideSelect.innerHTML = '';
+  const sorted = [...rides].sort((a,b) => rideSortKey(a).localeCompare(rideSortKey(b)));
+  for (const r of sorted) {
+    const opt = document.createElement('option');
+    opt.value = r.id;
+    opt.textContent = rideLabel(r);
+    rideSelect.appendChild(opt);
+  }
+  if (hasRides && !rides.find(r => r.id === ui.selectedId)) {
+    ui.selectedId = sorted[sorted.length - 1].id;
+    saveUI(ui);
+  }
+  rideSelect.value = ui.selectedId || '';
+
+  bTemp.classList.toggle('active', ui.metric === 'temp');
+  bHum.classList.toggle('active', ui.metric === 'hum');
+  zFree.classList.toggle('active', ui.zoomMode === 'free');
+  z2k.classList.toggle('active', ui.zoomMode === '2k');
+  z5k.classList.toggle('active', ui.zoomMode === '5k');
+  z10k.classList.toggle('active', ui.zoomMode === '10k');
+
+  const ride = rides.find(r => r.id === ui.selectedId) || null;
+  renderStats(ride);
+  renderRide(ride, ui.metric);
+}
+
+// ---------- Firestore subscription ----------
+onSnapshot(RIDES, (snap) => {
+  const next = [];
+  snap.forEach(d => next.push(unpackRide(d.data())));
+  rides = next;
+  // If we have a pending newly-uploaded ride, select it once it appears
+  if (pendingSelectId && rides.find(r => r.id === pendingSelectId)) {
+    ui.selectedId = pendingSelectId;
+    saveUI(ui);
+    pendingSelectId = null;
+  }
+  renderAll();
+  if (firstSnapshot) {
+    setStatus('idle', `✓ ${rides.length} ride${rides.length===1?'':'s'}`);
+    firstSnapshot = false;
+  }
+}, (err) => {
+  console.error('Snapshot error:', err);
+  setStatus('error', 'Connection failed');
+  rideEmpty.textContent = 'Could not connect to Firestore. Check your security rules.';
+});
+
+async function uploadRide(rideObj) {
+  const packed = packRide(rideObj);
+  await setDoc(doc(RIDES, rideObj.id), packed);
+}
+
+async function deleteRide(id) {
+  await deleteDoc(doc(RIDES, id));
+}
+
+// ---------- UI handlers ----------
+nameInput.addEventListener('input', () => {
+  ui.user = nameInput.value.trim();
+  saveUI(ui);
+});
+
+fileInput.addEventListener('change', async (e) => {
+  const files = Array.from(e.target.files);
+  const currentUser = (nameInput.value || '').trim();
+  if (!currentUser) {
+    if (!confirm('You haven\'t entered a name. Upload as "Anonymous"?')) {
+      fileInput.value = '';
+      nameInput.focus();
+      return;
+    }
+  }
+  setStatus('busy', 'Saving…');
+  uploadLabel.classList.add('disabled');
+
+  let added = 0, skipped = 0, failed = 0, lastId = null;
+  for (const f of files) {
+    try {
+      const text = await f.text();
+      const points = parseFile(text);
+      if (points.length === 0) { skipped++; continue; }
+      const dateIso = dateFromFilename(f.name);
+      const dateDisplay = dateIso ? prettyDate(dateIso) : f.name.replace(/\.txt$/i, '');
+      const id = 'r_' + Date.now() + '_' + Math.random().toString(36).slice(2,7);
+      const ride = {
+        id,
+        filename: f.name,
+        user: currentUser || 'Anonymous',
+        dateIso,
+        dateDisplay,
+        uploadedAt: Date.now(),
+        points
+      };
+      await uploadRide(ride);
+      lastId = id;
+      added++;
+    } catch (err) {
+      console.error(err);
+      failed++;
+    }
+  }
+  if (lastId) {
+    pendingSelectId = lastId;
+  }
+  fileInput.value = '';
+  uploadLabel.classList.remove('disabled');
+
+  if (failed > 0) {
+    setStatus('error', 'Some saves failed');
+    alert(`${added} saved, ${failed} failed.\n\nCheck the browser console for details. If you see permission errors, check that your Firestore rules allow read/write.`);
+  } else {
+    setStatus('idle', `✓ Saved`);
+  }
+  if (skipped > 0) alert(`${skipped} file(s) skipped (no valid data).`);
+});
+
+rideSelect.addEventListener('change', () => {
+  ui.selectedId = rideSelect.value;
+  saveUI(ui);
+  renderAll();
+});
+
+deleteBtn.addEventListener('click', async () => {
+  const ride = rides.find(r => r.id === ui.selectedId);
+  if (!ride) return;
+  if (!confirm(`Delete this ride?\n\n${rideLabel(ride)}\n\nThis affects everyone. Cannot be undone.`)) return;
+  setStatus('busy', 'Deleting…');
+  try {
+    await deleteRide(ride.id);
+    setStatus('idle', '✓ Deleted');
+  } catch (e) {
+    console.error(e);
+    setStatus('error', 'Delete failed');
+    alert('Delete failed: ' + (e.message || e));
+  }
+});
+
+bTemp.addEventListener('click', () => { ui.metric = 'temp'; saveUI(ui); renderAll(); });
+bHum.addEventListener('click',  () => { ui.metric = 'hum';  saveUI(ui); renderAll(); });
+function setZoomMode(m) { ui.zoomMode = m; saveUI(ui); renderAll(); }
+zFree.addEventListener('click', () => setZoomMode('free'));
+z2k.addEventListener('click',   () => setZoomMode('2k'));
+z5k.addEventListener('click',   () => setZoomMode('5k'));
+z10k.addEventListener('click',  () => setZoomMode('10k'));
+
+setTimeout(() => map.invalidateSize(), 100);
+window.addEventListener('resize', () => map.invalidateSize());
+</script>
+</body>
+</html>
