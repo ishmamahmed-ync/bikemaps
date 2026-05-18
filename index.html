@@ -51,6 +51,44 @@
     border-radius: 4px; cursor: pointer; font-size: 12px;
   }
   .toggle button.active { background: #2563eb; color: white; border-color: #2563eb; }
+  button.btn.plot {
+    background: #111; color: white; border-color: #111; margin-top: 6px;
+  }
+  button.btn.plot:hover { background: #333; }
+  button.btn.plot:disabled { background: #999; border-color: #999; }
+  .preview {
+    position: fixed; top: 12px; right: 12px; z-index: 1100;
+    background: white; padding: 8px; border-radius: 8px;
+    box-shadow: 0 4px 16px rgba(0,0,0,0.25);
+    width: clamp(280px, 40vw, 520px);
+  }
+  .preview-header {
+    display: flex; justify-content: space-between; align-items: center;
+    margin-bottom: 6px; padding: 0 4px; font-size: 12px; font-weight: 600; color: #333;
+  }
+  .preview-actions { display: flex; gap: 4px; }
+  .preview-btn {
+    width: 26px; height: 26px; border: 1px solid #ccc; background: white;
+    border-radius: 4px; cursor: pointer; font-size: 14px; line-height: 1;
+    display: flex; align-items: center; justify-content: center; padding: 0;
+  }
+  .preview-btn:hover { background: #f5f5f5; }
+  .preview-btn.download { color: #2563eb; border-color: #93c5fd; }
+  .preview-btn.download:hover { background: #eff6ff; }
+  .preview-body { position: relative; min-width: 320px; min-height: 120px; }
+  .preview-body canvas {
+    max-width: 480px; max-height: 380px; display: block; border-radius: 4px;
+    width: 100%; height: auto;
+  }
+  .preview-loading {
+    position: absolute; inset: 0; display: flex; align-items: center;
+    justify-content: center; background: rgba(255,255,255,0.9);
+    font-size: 13px; color: #555; border-radius: 4px;
+  }
+  .preview-loading.hidden { display: none; }
+  .preview-error {
+    padding: 16px; font-size: 12px; color: #b91c1c; text-align: center;
+  }
   .empty {
     color: #888; font-size: 12px; padding: 6px 0; text-align: center; font-style: italic;
   }
@@ -63,7 +101,7 @@
   .status.error { color: #b91c1c; }
 
   .legend {
-    position: absolute; bottom: 24px; right: 12px; z-index: 1000;
+    position: fixed; bottom: 24px; right: 12px; z-index: 1200;
     background: rgba(255,255,255,0.97); padding: 10px 12px; border-radius: 8px;
     box-shadow: 0 2px 12px rgba(0,0,0,0.15); font-size: 10px;
   }
@@ -130,7 +168,26 @@
       <button id="z-10k">10 km</button>
     </div>
   </div>
+
+  <div class="section" id="plot-section" style="display:none;">
+    <span class="lbl">Generate plots</span>
+    <button class="btn plot" id="btn-spatial">Generate Spatial Plots</button>
+    <button class="btn plot" id="btn-timeseries">Generate Time Series</button>
+  </div>
 </div>
+
+<div class="preview" id="preview" style="display:none;">
+  <div class="preview-header">
+    <span id="preview-title">Preview</span>
+    <div class="preview-actions">
+      <button class="preview-btn download" id="preview-download" title="Download JPG">⬇</button>
+      <button class="preview-btn" id="preview-close" title="Close">×</button>
+    </div>
+  </div>
+  <div class="preview-body">
+    <canvas id="preview-canvas"></canvas>
+    <div class="preview-loading hidden" id="preview-loading">Generating…</div>
+  </div>
 
 <div class="legend hidden" id="legend">
   <div class="title" id="legend-title">Temperature</div>
@@ -429,6 +486,15 @@ const rideEmpty = document.getElementById('ride-empty');
 const deleteBtn = document.getElementById('delete-btn');
 const toggleSec = document.getElementById('toggle-section');
 const zoomSec = document.getElementById('zoom-section');
+const plotSec = document.getElementById('plot-section');
+const btnSpatial = document.getElementById('btn-spatial');
+const btnTimeseries = document.getElementById('btn-timeseries');
+const previewEl = document.getElementById('preview');
+const previewCanvas = document.getElementById('preview-canvas');
+const previewLoading = document.getElementById('preview-loading');
+const previewTitle = document.getElementById('preview-title');
+const previewDownload = document.getElementById('preview-download');
+const previewClose = document.getElementById('preview-close');
 const bTemp = document.getElementById('b-temp');
 const bHum = document.getElementById('b-hum');
 const zFree = document.getElementById('z-free');
@@ -450,6 +516,7 @@ function renderAll() {
   deleteBtn.style.display = hasRides ? '' : 'none';
   toggleSec.style.display = hasRides ? '' : 'none';
   zoomSec.style.display = hasRides ? '' : 'none';
+  plotSec.style.display = hasRides ? '' : 'none';
   rideEmpty.style.display = hasRides ? 'none' : '';
 
   rideSelect.innerHTML = '';
@@ -547,6 +614,10 @@ fileInput.addEventListener('change', async (e) => {
         points
       };
       await uploadRide(ride);
+      // Optimistic local update so the legend & route appear immediately
+      // (Firestore snapshot will sync this same data shortly)
+      if (!rides.find(r => r.id === ride.id)) rides.push(ride);
+      ui.selectedId = id;
       lastId = id;
       added++;
     } catch (err) {
@@ -556,6 +627,8 @@ fileInput.addEventListener('change', async (e) => {
   }
   if (lastId) {
     pendingSelectId = lastId;
+    saveUI(ui);
+    renderAll();
   }
   fileInput.value = '';
   uploadLabel.classList.remove('disabled');
@@ -592,6 +665,470 @@ deleteBtn.addEventListener('click', async () => {
 
 bTemp.addEventListener('click', () => { ui.metric = 'temp'; saveUI(ui); renderAll(); });
 bHum.addEventListener('click',  () => { ui.metric = 'hum';  saveUI(ui); renderAll(); });
+// ---------- Plot generation ----------
+const PLOT_BOUNDS = {
+  south: 1.303634, north: 1.324667,
+  west: 103.764777, east: 103.790359
+};
+const PLOT_ZOOM = 16;
+const SAT_TILE_URL = 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}';
+const tileCache = new Map();
+let bgPromise = null;       // cached satellite background
+let isGenerating = false;
+
+function project(lon, lat, zoom) {
+  const TS = 256;
+  const scale = TS * Math.pow(2, zoom);
+  const x = (lon + 180) / 360 * scale;
+  const sinLat = Math.max(-0.9999, Math.min(0.9999, Math.sin(lat * Math.PI / 180)));
+  const y = (0.5 - Math.log((1 + sinLat) / (1 - sinLat)) / (4 * Math.PI)) * scale;
+  return { x, y };
+}
+
+function loadImage(url) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.crossOrigin = 'anonymous';
+    img.onload = () => resolve(img);
+    img.onerror = () => reject(new Error('Tile failed: ' + url));
+    img.src = url;
+  });
+}
+
+async function fetchTile(z, y, x) {
+  const key = `${z}/${y}/${x}`;
+  if (tileCache.has(key)) return tileCache.get(key);
+  const url = SAT_TILE_URL.replace('{z}', z).replace('{y}', y).replace('{x}', x);
+  const img = await loadImage(url);
+  tileCache.set(key, img);
+  return img;
+}
+
+async function buildSatelliteBackground() {
+  if (bgPromise) return bgPromise;
+  bgPromise = (async () => {
+    const sw = project(PLOT_BOUNDS.west, PLOT_BOUNDS.south, PLOT_ZOOM);
+    const ne = project(PLOT_BOUNDS.east, PLOT_BOUNDS.north, PLOT_ZOOM);
+    const minX = Math.min(sw.x, ne.x), maxX = Math.max(sw.x, ne.x);
+    const minY = Math.min(sw.y, ne.y), maxY = Math.max(sw.y, ne.y);
+    const minTileX = Math.floor(minX / 256), maxTileX = Math.floor(maxX / 256);
+    const minTileY = Math.floor(minY / 256), maxTileY = Math.floor(maxY / 256);
+
+    const tasks = [];
+    for (let ty = minTileY; ty <= maxTileY; ty++) {
+      for (let tx = minTileX; tx <= maxTileX; tx++) {
+        tasks.push(fetchTile(PLOT_ZOOM, ty, tx).then(img => ({ img, tx, ty })));
+      }
+    }
+    const tiles = await Promise.all(tasks);
+
+    const fullW = (maxTileX - minTileX + 1) * 256;
+    const fullH = (maxTileY - minTileY + 1) * 256;
+    const canvas = document.createElement('canvas');
+    canvas.width = fullW; canvas.height = fullH;
+    const ctx = canvas.getContext('2d');
+    for (const { img, tx, ty } of tiles) {
+      ctx.drawImage(img, (tx - minTileX) * 256, (ty - minTileY) * 256);
+    }
+
+    return {
+      canvas,
+      cropX: minX - minTileX * 256,
+      cropY: minY - minTileY * 256,
+      cropW: maxX - minX,
+      cropH: maxY - minY,
+      offsetX: minTileX * 256,
+      offsetY: minTileY * 256,
+      zoom: PLOT_ZOOM
+    };
+  })().catch(err => { bgPromise = null; throw err; });
+  return bgPromise;
+}
+
+// MATLAB-style jet colormap
+function jetColor(t) {
+  t = Math.max(0, Math.min(1, t));
+  let r, g, b;
+  if (t < 0.125)      { r = 0;                 g = 0;                 b = 0.5 + t * 4; }
+  else if (t < 0.375) { r = 0;                 g = (t - 0.125) * 4;   b = 1; }
+  else if (t < 0.625) { r = (t - 0.375) * 4;   g = 1;                 b = 1 - (t - 0.375) * 4; }
+  else if (t < 0.875) { r = 1;                 g = 1 - (t - 0.625) * 4; b = 0; }
+  else                { r = 1 - (t - 0.875) * 4; g = 0;               b = 0; }
+  return `rgb(${Math.round(r*255)},${Math.round(g*255)},${Math.round(b*255)})`;
+}
+
+// Meteorology — Magnus formula (Ea in hPa), Stull 2011 formula (Tw in °C)
+function vaporPressure(T, RH) {
+  const es = 6.112 * Math.exp(17.62 * T / (243.12 + T));
+  return es * RH / 100;
+}
+function wetBulb(T, RH) {
+  const Tc = Math.max(-20, Math.min(50, T));
+  const RHc = Math.max(5, Math.min(99, RH));
+  return Tc * Math.atan(0.151977 * Math.sqrt(RHc + 8.313659))
+       + Math.atan(Tc + RHc)
+       - Math.atan(RHc - 1.676331)
+       + 0.00391838 * Math.pow(RHc, 1.5) * Math.atan(0.023101 * RHc)
+       - 4.686035;
+}
+
+// Render one spatial panel inside the supplied region
+function renderSpatialPanel(ctx, panel, bg, pts, values, title, unit) {
+  const titleH = 36, tickPadL = 70, tickPadB = 36, cbarGap = 16, cbarW = 22, cbarLabelW = 56;
+  const availX = panel.x + tickPadL;
+  const availY = panel.y + titleH;
+  const availW = panel.w - tickPadL - cbarGap - cbarW - cbarLabelW - 8;
+  const availH = panel.h - titleH - tickPadB;
+
+  // Preserve geographic aspect ratio — fit map inside available area, center it
+  const dataAspect = bg.cropW / bg.cropH;
+  let mapW, mapH;
+  if (availW / availH > dataAspect) {
+    mapH = availH;
+    mapW = mapH * dataAspect;
+  } else {
+    mapW = availW;
+    mapH = mapW / dataAspect;
+  }
+  const mapX = availX + (availW - mapW) / 2;
+  const mapY = availY + (availH - mapH) / 2;
+
+  // Satellite background, cropped to bounds
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(mapX, mapY, mapW, mapH);
+  ctx.clip();
+  ctx.drawImage(
+    bg.canvas,
+    bg.cropX, bg.cropY, bg.cropW, bg.cropH,
+    mapX, mapY, mapW, mapH
+  );
+  ctx.restore();
+
+  // Project lon/lat → panel pixel
+  function projPt(lon, lat) {
+    const p = project(lon, lat, bg.zoom);
+    return {
+      x: mapX + ((p.x - bg.offsetX) - bg.cropX) * mapW / bg.cropW,
+      y: mapY + ((p.y - bg.offsetY) - bg.cropY) * mapH / bg.cropH
+    };
+  }
+
+  const vmin = Math.min(...values), vmax = Math.max(...values);
+
+  // Colored route (clipped to map area)
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(mapX, mapY, mapW, mapH);
+  ctx.clip();
+  ctx.lineWidth = 3.5;
+  ctx.lineCap = 'round';
+  for (let i = 1; i < pts.length; i++) {
+    const a = projPt(pts[i-1].lon, pts[i-1].lat);
+    const b = projPt(pts[i].lon, pts[i].lat);
+    const v = (values[i-1] + values[i]) / 2;
+    const t = vmax === vmin ? 0.5 : (v - vmin) / (vmax - vmin);
+    ctx.strokeStyle = jetColor(t);
+    ctx.beginPath();
+    ctx.moveTo(a.x, a.y);
+    ctx.lineTo(b.x, b.y);
+    ctx.stroke();
+  }
+  ctx.restore();
+
+  // Map border
+  ctx.strokeStyle = '#000';
+  ctx.lineWidth = 1;
+  ctx.strokeRect(mapX + 0.5, mapY + 0.5, mapW, mapH);
+
+  // Title (centered just above the map)
+  ctx.fillStyle = '#000';
+  ctx.font = 'bold 18px serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'alphabetic';
+  ctx.fillText(title, mapX + mapW / 2, mapY - 12);
+
+  // Unit (just above the colorbar)
+  ctx.font = 'italic 14px serif';
+  ctx.textAlign = 'left';
+  ctx.fillText(unit, mapX + mapW + cbarGap, mapY - 12);
+
+  // Colorbar
+  const cbX = mapX + mapW + cbarGap;
+  const cbY = mapY;
+  const grad = ctx.createLinearGradient(0, cbY + mapH, 0, cbY);
+  for (let i = 0; i <= 10; i++) grad.addColorStop(i / 10, jetColor(i / 10));
+  ctx.fillStyle = grad;
+  ctx.fillRect(cbX, cbY, cbarW, mapH);
+  ctx.strokeStyle = '#000'; ctx.lineWidth = 1;
+  ctx.strokeRect(cbX + 0.5, cbY + 0.5, cbarW, mapH);
+
+  // Colorbar ticks
+  ctx.fillStyle = '#000';
+  ctx.font = '12px sans-serif';
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'middle';
+  const N_CB = 8;
+  for (let i = 0; i < N_CB; i++) {
+    const t = i / (N_CB - 1);
+    const v = vmin + (vmax - vmin) * t;
+    const y = cbY + mapH - mapH * t;
+    ctx.fillText(v.toFixed(2), cbX + cbarW + 4, y);
+    ctx.beginPath();
+    ctx.moveTo(cbX + cbarW, y);
+    ctx.lineTo(cbX + cbarW + 3, y);
+    ctx.stroke();
+  }
+
+  // Lat ticks (left of map)
+  ctx.textAlign = 'right';
+  ctx.textBaseline = 'middle';
+  ctx.font = '11px sans-serif';
+  const N_LAT = 4;
+  for (let i = 0; i < N_LAT; i++) {
+    const t = i / (N_LAT - 1);
+    const lat = PLOT_BOUNDS.south + (PLOT_BOUNDS.north - PLOT_BOUNDS.south) * t;
+    const y = mapY + mapH - mapH * t;
+    ctx.fillText(lat.toFixed(3) + '°N', mapX - 5, y);
+    ctx.beginPath();
+    ctx.moveTo(mapX - 3, y); ctx.lineTo(mapX, y); ctx.stroke();
+  }
+
+  // Lon ticks (below map)
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'top';
+  const N_LON = 4;
+  for (let i = 0; i < N_LON; i++) {
+    const t = i / (N_LON - 1);
+    const lon = PLOT_BOUNDS.west + (PLOT_BOUNDS.east - PLOT_BOUNDS.west) * t;
+    const x = mapX + mapW * t;
+    ctx.fillText(lon.toFixed(3) + '°E', x, mapY + mapH + 5);
+    ctx.beginPath();
+    ctx.moveTo(x, mapY + mapH); ctx.lineTo(x, mapY + mapH + 3); ctx.stroke();
+  }
+}
+
+async function buildSpatialCanvas(ride) {
+  const pts = ride.points;
+  const tempVals = pts.map(p => p.temp);
+  const eaVals = pts.map(p => vaporPressure(p.temp, p.hum));
+  const twVals = pts.map(p => wetBulb(p.temp, p.hum));
+
+  const bg = await buildSatelliteBackground();
+
+  const TOTAL_W = 1400, TOTAL_H = 890;
+  const PW = TOTAL_W / 3;
+  const PH = TOTAL_H;
+  const canvas = document.createElement('canvas');
+  canvas.width = TOTAL_W;
+  canvas.height = TOTAL_H;
+  const ctx = canvas.getContext('2d');
+  ctx.fillStyle = 'white';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  renderSpatialPanel(ctx, { x: 0,      y: 0, w: PW, h: PH }, bg, pts, tempVals, 'Temperature',         '°C');
+  renderSpatialPanel(ctx, { x: PW,     y: 0, w: PW, h: PH }, bg, pts, eaVals,   'Vapor Pressure (Ea)', 'hPa');
+  renderSpatialPanel(ctx, { x: PW * 2, y: 0, w: PW, h: PH }, bg, pts, twVals,   'Wet-Bulb (Tw)',       '°C');
+
+  return canvas;
+}
+
+// Time series
+function renderTimeSeriesPanel(ctx, panel, times, values, ylabel) {
+  const padL = 80, padR = 30, padT = 16, padB = 38;
+  const plotX = panel.x + padL;
+  const plotY = panel.y + padT;
+  const plotW = panel.w - padL - padR;
+  const plotH = panel.h - padT - padB;
+
+  const tmin = times[0], tmax = times[times.length - 1];
+  const vmin = Math.min(...values), vmax = Math.max(...values);
+  const vpad = (vmax - vmin) * 0.08 || 1;
+  const yMin = vmin - vpad, yMax = vmax + vpad;
+
+  const projX = t => plotX + (t - tmin) / (tmax - tmin || 1) * plotW;
+  const projY = v => plotY + plotH - (v - yMin) / (yMax - yMin) * plotH;
+
+  // Plot background
+  ctx.fillStyle = 'white';
+  ctx.fillRect(plotX, plotY, plotW, plotH);
+
+  // Grid
+  ctx.strokeStyle = '#e8e8e8';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  for (let i = 1; i < 6; i++) {
+    const x = plotX + plotW * i / 6;
+    ctx.moveTo(x, plotY); ctx.lineTo(x, plotY + plotH);
+  }
+  for (let i = 1; i < 5; i++) {
+    const y = plotY + plotH * i / 5;
+    ctx.moveTo(plotX, y); ctx.lineTo(plotX + plotW, y);
+  }
+  ctx.stroke();
+
+  // Orange data dots
+  ctx.fillStyle = '#d95319';   // MATLAB default orange-red
+  for (let i = 0; i < times.length; i++) {
+    const x = projX(times[i]);
+    const y = projY(values[i]);
+    ctx.beginPath();
+    ctx.arc(x, y, 1.6, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  // Axes
+  ctx.strokeStyle = '#000';
+  ctx.lineWidth = 1.2;
+  ctx.beginPath();
+  ctx.moveTo(plotX, plotY);
+  ctx.lineTo(plotX, plotY + plotH);
+  ctx.lineTo(plotX + plotW, plotY + plotH);
+  ctx.stroke();
+
+  // X ticks (time)
+  ctx.fillStyle = '#000';
+  ctx.font = '13px sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'top';
+  const N_X = 6;
+  for (let i = 0; i <= N_X; i++) {
+    const t = tmin + (tmax - tmin) * i / N_X;
+    const x = projX(t);
+    const lbl = secToTime(Math.round(t)).slice(0, 5);
+    ctx.fillText(lbl, x, plotY + plotH + 6);
+    ctx.beginPath();
+    ctx.moveTo(x, plotY + plotH); ctx.lineTo(x, plotY + plotH + 4); ctx.stroke();
+  }
+
+  // Y ticks
+  ctx.textAlign = 'right';
+  ctx.textBaseline = 'middle';
+  const N_Y = 5;
+  for (let i = 0; i <= N_Y; i++) {
+    const v = yMin + (yMax - yMin) * i / N_Y;
+    const y = projY(v);
+    ctx.fillText(v.toFixed(1), plotX - 6, y);
+    ctx.beginPath();
+    ctx.moveTo(plotX - 4, y); ctx.lineTo(plotX, y); ctx.stroke();
+  }
+
+  // Y-axis label (rotated)
+  ctx.save();
+  ctx.translate(panel.x + 22, plotY + plotH / 2);
+  ctx.rotate(-Math.PI / 2);
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.font = '15px sans-serif';
+  ctx.fillText(ylabel, 0, 0);
+  ctx.restore();
+}
+
+function buildTimeSeriesCanvas(ride) {
+  const pts = ride.points;
+  const t0Sec = timeToSec(pts[0].t);
+  // Use seconds-from-start internally; format back to clock time for labels
+  const startSec = t0Sec;
+  const times = pts.map(p => timeToSec(p.t));
+  const tempVals = pts.map(p => p.temp);
+  const eaVals = pts.map(p => vaporPressure(p.temp, p.hum));
+  const twVals = pts.map(p => wetBulb(p.temp, p.hum));
+
+  const PW = 1400, PH = 280, footerH = 50;
+  const canvas = document.createElement('canvas');
+  canvas.width = PW;
+  canvas.height = PH * 3 + footerH;
+  const ctx = canvas.getContext('2d');
+  ctx.fillStyle = 'white';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  renderTimeSeriesPanel(ctx, { x: 0, y: 0,        w: PW, h: PH }, times, tempVals, 'Ta (°C)');
+  renderTimeSeriesPanel(ctx, { x: 0, y: PH,       w: PW, h: PH }, times, eaVals,   'Ea (hPa)');
+  renderTimeSeriesPanel(ctx, { x: 0, y: PH * 2,   w: PW, h: PH }, times, twVals,   'Tw (°C)');
+
+  // Date footer (bottom-right)
+  if (ride.dateDisplay) {
+    ctx.fillStyle = '#222';
+    ctx.font = '14px sans-serif';
+    ctx.textAlign = 'right';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(ride.dateDisplay, PW - 30, PH * 3 + footerH / 2);
+  }
+
+  return canvas;
+}
+
+// Filename helpers
+function safeFilenamePart(s) {
+  return String(s || '').replace(/[^a-zA-Z0-9_-]/g, '_').replace(/_+/g, '_');
+}
+function buildFilename(ride, suffix) {
+  const dateP = ride.dateIso || 'date';
+  const t0 = (ride.points[0]?.t || '').replace(/:/g, '');
+  const t1 = (ride.points[ride.points.length-1]?.t || '').replace(/:/g, '');
+  const distKm = (rideDistance(ride.points)/1000).toFixed(2);
+  const user = safeFilenamePart(ride.user || 'anon');
+  return `${dateP}_${t0}-${t1}_${distKm}km_${user}_${suffix}.jpg`;
+}
+
+// Preview pipeline
+let currentPreviewCanvas = null;
+let currentPreviewFilename = null;
+
+function showPreviewBox() { previewEl.style.display = ''; }
+function hidePreviewBox() { previewEl.style.display = 'none'; }
+
+async function runGenerate(kind) {
+  if (isGenerating) return;
+  const ride = rides.find(r => r.id === ui.selectedId);
+  if (!ride) { alert('Select a ride first.'); return; }
+
+  isGenerating = true;
+  btnSpatial.disabled = true;
+  btnTimeseries.disabled = true;
+  showPreviewBox();
+  previewLoading.classList.remove('hidden');
+  previewLoading.textContent = kind === 'spatial' ? 'Generating spatial plots…' : 'Generating time series…';
+  previewTitle.textContent = kind === 'spatial' ? 'Spatial Plots' : 'Time Series';
+
+  try {
+    const canvas = kind === 'spatial'
+      ? await buildSpatialCanvas(ride)
+      : buildTimeSeriesCanvas(ride);
+
+    // Render to visible preview canvas (scaled)
+    const previewMaxW = 480;
+    const scale = Math.min(1, previewMaxW / canvas.width);
+    previewCanvas.width = Math.round(canvas.width * scale);
+    previewCanvas.height = Math.round(canvas.height * scale);
+    const pctx = previewCanvas.getContext('2d');
+    pctx.drawImage(canvas, 0, 0, previewCanvas.width, previewCanvas.height);
+
+    currentPreviewCanvas = canvas;
+    currentPreviewFilename = buildFilename(ride, kind === 'spatial' ? 'spatial' : 'timeseries');
+    previewLoading.classList.add('hidden');
+  } catch (err) {
+    console.error(err);
+    previewLoading.textContent = 'Failed: ' + (err.message || 'unknown error');
+    currentPreviewCanvas = null;
+  } finally {
+    isGenerating = false;
+    btnSpatial.disabled = false;
+    btnTimeseries.disabled = false;
+  }
+}
+
+btnSpatial.addEventListener('click', () => runGenerate('spatial'));
+btnTimeseries.addEventListener('click', () => runGenerate('timeseries'));
+previewClose.addEventListener('click', () => { hidePreviewBox(); currentPreviewCanvas = null; });
+previewDownload.addEventListener('click', () => {
+  if (!currentPreviewCanvas) return;
+  const link = document.createElement('a');
+  link.download = currentPreviewFilename || 'plot.jpg';
+  link.href = currentPreviewCanvas.toDataURL('image/jpeg', 0.92);
+  link.click();
+});
+
 function setZoomMode(m) { ui.zoomMode = m; saveUI(ui); renderAll(); }
 zFree.addEventListener('click', () => setZoomMode('free'));
 z2k.addEventListener('click',   () => setZoomMode('2k'));
